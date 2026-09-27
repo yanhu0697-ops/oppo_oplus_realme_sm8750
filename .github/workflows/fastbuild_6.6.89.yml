@@ -561,10 +561,9 @@ jobs:
         run: |
           cd kernel_workspace/common
           echo "正在应用内核纯净补丁，消除 TAINT_WARN 与 TAINT_OOT_MODULE 污染..."
-          # 1. 阻断树外模块打标与日志 (消除 4096 污染及 dmesg 痕迹)
-          sed -i 's/add_taint_module(mod, TAINT_OOT_MODULE.*/\/* bypassed OOT taint *\//g' kernel/module/main.c
-          sed -i 's/pr_warn("%s: loading out-of-tree module taints kernel.*/\/* silenced *\//g' kernel/module/main.c
-          # 2. 阻断 /proc/modules 树外模块 (O) 标志字符输出
+          # 1. 源头条件短路：彻底消除 4096 污染源及相关 dmesg 日志（编译器死代码消除，杜绝多行悬空语法错误）
+          sed -i 's/if (!get_modinfo(info, "intree"))/if (0 \&\& !get_modinfo(info, "intree"))/g' kernel/module/main.c
+          # 2. 阻断 /proc/modules 树外模块 (O) 标志字符输出（双重保险）
           sed -i "s/\*buf++ = 'O';/\/* no O *\/;/g" kernel/module/main.c
           # 3. 阻断 TAINT_WARN (512) 与 TAINT_OOT_MODULE (4096) 置位全局 tainted_mask
           sed -i '/set_bit(flag, &tainted_mask);/i \    if (flag == TAINT_WARN || flag == TAINT_OOT_MODULE) return;' kernel/panic.c
