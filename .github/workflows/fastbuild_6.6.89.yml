@@ -428,208 +428,39 @@ jobs:
           echo "正在应用内核系统调用耗时侧信道补丁 (抹平 newfstatat 与 statx 时间比值差异)..."
           cd kernel_workspace
           
-          cat << 'EOF' > /tmp/pr3877_timing.patch
-diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
-index 033cab8dc349..459f99f920b7 100644
---- a/kernel/feature/selinux_hide.c
-+++ b/kernel/feature/selinux_hide.c
-@@ -1,7 +1,9 @@
- #include "selinux_hide.h"
- #include "infra/symbol_resolver.h"
- #include "linux/jump_label.h"
-+#include "linux/rcupdate.h"
- #include "selinux/sepolicy.h"
-+#include "ss/policydb.h"
- #include <linux/cred.h>
- #include <linux/cpu.h>
- #include <linux/memory.h>
-@@ -61,9 +63,8 @@ typedef ssize_t (*write_op_fn)(struct file *, char *, size_t);
- 
- static write_op_fn *selinux_write_op;
- 
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
- static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
--                                               u32 *sid, u32 def_sid, gfp_t gfp_flags);
-+                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
- static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
-                                                u32 *scontext_len);
- static void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
-@@ -73,13 +74,24 @@ static void (*security_dump_masked_av_fn)(struct policydb *policydb, struct cont
- static void (*context_struct_compute_av_fn)(struct policydb *policydb, struct context *scontext,
-                                             struct context *tcontext, u16 tclass, struct av_decision *avd,
-                                             struct extended_perms *xperms) = NULL;
--#else
--static struct selinux_state fake_state;
--#endif
- 
- static write_op_fn *context_write, *access_write;
- static write_op_fn orig_context_write, orig_access_write;
- 
-+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-+#define ksu_avc_has_perm_compat(...) avc_has_perm(__VA_ARGS__)
-+#define ksu_security_bounded_transition_compat(...) security_bounded_transition(__VA_ARGS__)
-+#else
-+#define ksu_avc_has_perm_compat(...) avc_has_perm(&selinux_state, __VA_ARGS__)
-+#define ksu_security_bounded_transition_compat(...) security_bounded_transition(&selinux_state, __VA_ARGS__)
-+#endif
-+
-+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-+#define ksu_task_security_struct task_security_struct
-+#else
-+#define ksu_task_security_struct cred_security_struct
-+#endif
-+
- static ssize_t my_write_context(struct file *file, char *buf, size_t size)
- {
-     // apply to all app uids
-@@ -87,19 +99,16 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
-         return orig_context_write(file, buf, size);
-     }
-     char *canon = NULL;
--    u32 sid, len, tmp;
-+    u32 sid, len;
-     ssize_t length;
- 
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
--    length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
-+    length =
-+        ksu_avc_has_perm_compat(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
-     if (length)
-         goto out;
--    length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
-+    length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
-     if (length) {
-         goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(buf, size, &tmp, GFP_KERNEL);
-     }
- 
-     length = security_sid_to_context_with_policy(backup_sepolicy, sid, &canon, &len);
-@@ -113,24 +122,6 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
-                __func__, len);
-         goto out;
-     }
--#else
--    length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY,
--                          SECURITY__CHECK_CONTEXT, NULL);
--    if (length)
--        goto out;
--
--    length = security_context_to_sid(&fake_state, buf, size, &sid, GFP_KERNEL);
--    if (length) {
--        goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(&selinux_state, buf, size, &tmp, GFP_KERNEL);
--    }
--
--    length = security_sid_to_context(&fake_state, sid, &canon, &len);
--    if (length)
--        goto out;
--#endif
- 
-     memcpy(buf, canon, len);
-     length = len;
-@@ -146,17 +137,12 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
-         return orig_access_write(file, buf, size);
-     }
-     char *scon = NULL, *tcon = NULL;
--    u32 ssid, tsid, sconlen, tconlen, tmp;
-+    u32 ssid, tsid, sconlen, tconlen;
-     u16 tclass;
-     struct av_decision avd;
-     ssize_t length;
- 
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
--    length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
--#else
--    length =
--        avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
--#endif
-+    length = ksu_avc_has_perm_compat(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
-     if (length)
-         goto out;
- 
-@@ -177,43 +163,19 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
-     sconlen = strlen(scon);
-     tconlen = strlen(tcon);
- 
--#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
--    length = security_context_to_sid_with_policy(backup_sepolicy, scon, sconlen, &ssid, SECSID_NULL, GFP_KERNEL);
-+    length =
-+        security_context_to_sid_with_policy(backup_sepolicy, scon, sconlen, &ssid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
-     if (length) {
-         goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(scon, sconlen, &tmp, GFP_KERNEL);
-     }
- 
--    length = security_context_to_sid_with_policy(backup_sepolicy, tcon, tconlen, &tsid, SECSID_NULL, GFP_KERNEL);
-+    length =
-+        security_context_to_sid_with_policy(backup_sepolicy, tcon, tconlen, &tsid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
-     if (length) {
-         goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(tcon, tconlen, &tmp, GFP_KERNEL);
-     }
- 
-     security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, &avd);
--#else
--    length = security_context_to_sid(&fake_state, scon, sconlen, &ssid, GFP_KERNEL);
--    if (length) {
--        goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(&selinux_state, scon, sconlen, &tmp, GFP_KERNEL);
--    }
--
--    length = security_context_to_sid(&fake_state, tcon, tconlen, &tsid, GFP_KERNEL);
--    if (length) {
--        goto out;
--    } else {
--        // sync to global sidtab
--        security_context_to_sid(&selinux_state, tcon, tconlen, &tmp, GFP_KERNEL);
--    }
--
--    security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd);
--#endif
- 
-     // stock reads 1; a loader load_policy may have bumped the backup before we load
-     avd.seqno = 1;
-EOF
-
-          # 依次检测所有可能的驱动目录并应用补丁
+          # 依次检测所有可能的驱动目录并应用优化
           for KSU_DIR in KernelSU KernelSU-Next common/drivers/kernelsu; do
             if [ -d "$KSU_DIR" ]; then
-              echo ">>> 正在检查目录: $KSU_DIR"
+              echo ">>> 正在检查并处理驱动目录: $KSU_DIR"
               cd "$KSU_DIR"
-              if git apply --check /tmp/pr3877_timing.patch >/dev/null 2>&1; then
-                git apply /tmp/pr3877_timing.patch
-                echo ">>> 成功应用 PR #3877 补丁到 $KSU_DIR ！"
-              else
-                # 检查代码是否已经包含该修复
+              
+              if [ -f "kernel/feature/selinux_hide.c" ]; then
+                # 检查是否已原生合入修复 (避免重复修改)
                 if grep -q "security_context_to_sid_with_policy.*orig_sid_p" kernel/feature/selinux_hide.c 2>/dev/null; then
-                  echo ">>> 检测到上游源码已原生包含 PR #3877 耗时修复，无需重复打入！"
-                elif [ -f "kernel/feature/selinux_hide.c" ]; then
-                  echo ">>> 正在执行幂等 sidtab 双倍同步耗时剔除..."
+                  echo ">>> 检测到 $KSU_DIR 源码已原生包含 PR #3877 耗时修复，无需额外注入！"
+                else
+                  echo ">>> 正在为 $KSU_DIR 注入耗时侧信道消除逻辑..."
+                  # 核心动作：彻底拔除向全局 sidtab 二次同步带来的数百纳秒异常耗时（斩断时间侧信道探测源头）
                   sed -i '/\/\/ sync to global sidtab/,+1d' kernel/feature/selinux_hide.c || true
-                  echo ">>> $KSU_DIR 中的 sidtab 冗余耗时已消除！"
+                  sed -i '/security_context_to_sid(buf, size, &tmp, GFP_KERNEL);/d' kernel/feature/selinux_hide.c || true
+                  sed -i '/security_context_to_sid(scon, sconlen, &tmp, GFP_KERNEL);/d' kernel/feature/selinux_hide.c || true
+                  sed -i '/security_context_to_sid(tcon, tconlen, &tmp, GFP_KERNEL);/d' kernel/feature/selinux_hide.c || true
+                  sed -i '/security_context_to_sid(&selinux_state, scon, sconlen, &tmp, GFP_KERNEL);/d' kernel/feature/selinux_hide.c || true
+                  sed -i '/security_context_to_sid(&selinux_state, tcon, tconlen, &tmp, GFP_KERNEL);/d' kernel/feature/selinux_hide.c || true
+                  echo ">>> $KSU_DIR 中的 sidtab 冗余耗时已成功消除！"
                 fi
               fi
+              
               cd "${{ github.workspace }}/kernel_workspace"
             fi
           done
-          rm -f /tmp/pr3877_timing.patch
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
           cd kernel_workspace
-          git clone --depth=1 https://github.$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
+          git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
           cp ./$GITHUB_ACTOR/zram_patch/001-lz4.patch ./common/
           cp ./$GITHUB_ACTOR/zram_patch/lz4armv8.S ./common/lib
           cp ./$GITHUB_ACTOR/zram_patch/002-zstd.patch ./common/
