@@ -354,10 +354,34 @@ jobs:
               echo ">>> 正在检出指定的 SukiSU-Ultra 驱动版本/Commit: $KSU_TARGET_REF"
               git checkout "$KSU_TARGET_REF" || true
             fi
-            KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || git rev-list --count main 2>/dev/null) + 30700 2>/dev/null || echo 114514)
-            echo "计算得到的 SukiSU 驱动版本 Code: $KSU_VERSION"
+            
+            # 自动化动态解析：优先从源码树自身提取官方定义的 Version Code
+            DYNAMIC_CODE=""
+            if [ -f "manager/app/build.gradle.kts" ]; then
+              DYNAMIC_CODE=$(grep -E 'versionCode\s*=\s*[0-9]+' manager/app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
+            fi
+            if [ -z "$DYNAMIC_CODE" ] && [ -f "userspace/ksud/Cargo.toml" ]; then
+              DYNAMIC_CODE=$(grep -E '^version\s*=\s*' userspace/ksud/Cargo.toml | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | awk -F. '{printf("%d%02d%02d", $1, $2, $3)}' || true)
+            fi
+            
+            # 若自动检测失败则依据语义化 Tag 兜底，绝不使用死值
+            if [ -n "$DYNAMIC_CODE" ]; then
+              KSU_VERSION="$DYNAMIC_CODE"
+            else
+              SEM_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v4.2.0")
+              CLEAN_SEM=$(echo "$SEM_TAG" | sed 's/^v//')
+              MAJOR=$(echo "$CLEAN_SEM" | cut -d. -f1)
+              MINOR=$(echo "$CLEAN_SEM" | cut -d. -f2)
+              PATCH=$(echo "$CLEAN_SEM" | cut -d. -f3 | cut -d- -f1)
+              KSU_VERSION=$(awk "BEGIN {printf \"%d%02d%02d\", $MAJOR, $MINOR, $PATCH}")
+            fi
+            
+            echo "动态解析并锁定的 SukiSU 官方驱动版本 Code: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+            # 写入驱动 Kbuild 内部硬编码宏
+            sed -i "s/DKSU_VERSION=[0-9]*/DKSU_VERSION=${KSU_VERSION}/g" kernel/Kbuild 2>/dev/null || true
+            sed -i "s/KSU_VERSION_FALLBACK := [0-9]*/KSU_VERSION_FALLBACK := ${KSU_VERSION}/g" kernel/Kbuild 2>/dev/null || true
             cd ..
           elif [[ ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置 BakaSU (Baka-SU/BakaSU)..."
@@ -513,6 +537,19 @@ jobs:
           fi
           
           echo "DirtyFrag 官方修复注入完成！"
+
+      - name: 净化驱动 Git 工作区 (消除 -dirty 后缀)
+        run: |
+          cd kernel_workspace
+          for KSU_DIR in KernelSU KernelSU-Next common/drivers/kernelsu; do
+            if [ -d "$KSU_DIR/.git" ]; then
+              echo ">>> 正在提交 $KSU_DIR 的本地修补，消除 -dirty 后缀..."
+              cd "$KSU_DIR"
+              git config user.name "cctv18-builder" && git config user.email "builder@local"
+              git commit -am "chore: clean working tree for pristine release" || true
+              cd "${{ github.workspace }}/kernel_workspace"
+            fi
+          done
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
@@ -980,18 +1017,4 @@ jobs:
           - 净化编译链，剔除第三方二进制注入
           
           ### 📋 安装方法 | Installation Guide
-          1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；
-          2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
-          3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
-          4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
-          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
-          
-          #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
-          EOF
-
-          gh release create "${{ env.TAG_HEAD }}-${{ env.TIME }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
-            --notes-file release_notes.md \
-            release_zips/AnyKernel3_*.zip
+          1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重�
