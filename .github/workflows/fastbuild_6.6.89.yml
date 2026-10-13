@@ -355,33 +355,22 @@ jobs:
               git checkout "$KSU_TARGET_REF" || true
             fi
             
-            # 自动化动态解析：优先从源码树自身提取官方定义的 Version Code
-            DYNAMIC_CODE=""
-            if [ -f "manager/app/build.gradle.kts" ]; then
-              DYNAMIC_CODE=$(grep -E 'versionCode\s*=\s*[0-9]+' manager/app/build.gradle.kts | head -n 1 | grep -oE '[0-9]+' || true)
-            fi
-            if [ -z "$DYNAMIC_CODE" ] && [ -f "userspace/ksud/Cargo.toml" ]; then
-              DYNAMIC_CODE=$(grep -E '^version\s*=\s*' userspace/ksud/Cargo.toml | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | awk -F. '{printf("%d%02d%02d", $1, $2, $3)}' || true)
-            fi
-            
-            # 若自动检测失败则依据语义化 Tag 兜底，绝不使用死值
-            if [ -n "$DYNAMIC_CODE" ]; then
-              KSU_VERSION="$DYNAMIC_CODE"
+            # 自动化动态解析：遵循 SukiSU-Ultra 官方算法 (40000 + Commits - 2815)
+            LOCAL_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+            if [ "$LOCAL_COUNT" -gt 0 ]; then
+              KSU_VERSION=$(expr 40000 + $LOCAL_COUNT - 2815 2>/dev/null || echo 40971)
             else
-              SEM_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v4.2.0")
-              CLEAN_SEM=$(echo "$SEM_TAG" | sed 's/^v//')
-              MAJOR=$(echo "$CLEAN_SEM" | cut -d. -f1)
-              MINOR=$(echo "$CLEAN_SEM" | cut -d. -f2)
-              PATCH=$(echo "$CLEAN_SEM" | cut -d. -f3 | cut -d- -f1)
-              KSU_VERSION=$(awk "BEGIN {printf \"%d%02d%02d\", $MAJOR, $MINOR, $PATCH}")
+              GITHUB_COMMITS=$(curl -sI "https://api.github.com/repos/ShirkNeko/SukiSU-Ultra/commits?sha=main&per_page=1" 2>/dev/null | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
+              if [ -n "$GITHUB_COMMITS" ]; then
+                KSU_VERSION=$(expr 40000 + $GITHUB_COMMITS - 2815 2>/dev/null || echo 40971)
+              else
+                KSU_VERSION=40971
+              fi
             fi
             
             echo "动态解析并锁定的 SukiSU 官方驱动版本 Code: $KSU_VERSION"
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            # 写入驱动 Kbuild 内部硬编码宏
-            sed -i "s/DKSU_VERSION=[0-9]*/DKSU_VERSION=${KSU_VERSION}/g" kernel/Kbuild 2>/dev/null || true
-            sed -i "s/KSU_VERSION_FALLBACK := [0-9]*/KSU_VERSION_FALLBACK := ${KSU_VERSION}/g" kernel/Kbuild 2>/dev/null || true
             cd ..
           elif [[ ${{ github.event.inputs.ksu_type }} == "bakasu" ]]; then
             echo "正在配置 BakaSU (Baka-SU/BakaSU)..."
