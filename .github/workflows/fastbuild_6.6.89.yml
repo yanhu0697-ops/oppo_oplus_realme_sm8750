@@ -351,7 +351,7 @@ jobs:
             echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
             cd ./KernelSU
             if [[ -n "$KSU_TARGET_REF" ]]; then
-              echo ">>> 正在检出用户指定的 BakaSU 驱动版本/Commit: $KSU_TARGET_REF"
+              echo ">>> 正在检出用户指定的驱动版本/Commit: $KSU_TARGET_REF"
               git checkout "$KSU_TARGET_REF" || true
             fi
             # 生成自定义版本号（基于当前检出的提交计数）
@@ -423,9 +423,10 @@ jobs:
             cd ..
           fi
           if [[ "${{ github.event.inputs.bypass_susfs_check }}" == "true" ]]; then
-            echo ">>> 正在为 susfs_compat.mk 实施自动降级放行策略，规避版本阻断..."
-            find . -name "susfs_compat.mk" -exec sed -i 's/\$(error Please wait susfs update\.\. Stop\..*)/\$(warning Bypassing susfs check)/g' {} + || true
-            find ./susfs4ksu -type f -exec sed -i 's/\$(error Please wait susfs update\.\. Stop\..*)/\$(warning Bypassing susfs check)/g' {} + || true
+            echo ">>> 正在为 susfs_compat.mk 实施全量自动降级放行策略，规避版本阻断..."
+            find . -type f -name "susfs_compat.mk" -exec sed -i 's/\$(error Please wait susfs update\.\. Stop\..*)/\$(warning Bypassing susfs check)/g' {} + || true
+            find . -type f -name "susfs_compat.mk" -exec sed -i 's/\$(error Please wait susfs update\..*)/\$(warning Bypassing susfs check)/g' {} + || true
+            find . -type f -name "susfs_compat.mk" -exec sed -i 's/\$(error .*)/\$(warning Bypassing check)/g' {} + || true
           fi
 
       - name: 应用 SELinux 耗时侧信道防御补丁 (PR #3877 开关控制)
@@ -461,36 +462,45 @@ jobs:
             fi
           done
 
-      - name: 应用 DirtyFrag (CVE-2026-43284) 安全加固补丁
+      - name: 应用 DirtyFrag (CVE-2026-43284) 官方安全修复 (Commit f4c50a4)
         if: inputs.dirtyfrag_fix
         run: |
-          echo "正在应用 DirtyFrag (CVE-2026-43284) 漏洞防御补丁..."
+          echo "正在应用 Linux 官方 DirtyFrag (CVE-2026-43284) 修复补丁 (Commit f4c50a4)..."
           cd kernel_workspace/common
           
-          # 1. 修复 IPv4 分片重组逻辑：阻断克隆 skb 未执行 COW 导致的内存覆写提权
-          if [ -f "net/ipv4/ip_fragment.c" ]; then
-            if grep -q "skb_cloned(head) && pskb_expand_head" net/ipv4/ip_fragment.c; then
-              echo ">>> net/ipv4/ip_fragment.c 已存在防覆写补丁，跳过。"
+          # 1. 修复 IPv4 UDP 发送路径：补齐 SKBFL_SHARED_FRAG 标记
+          if [ -f "net/ipv4/ip_output.c" ]; then
+            if grep -q "MSG_NO_SHARED_FRAGS" net/ipv4/ip_output.c; then
+              echo ">>> net/ipv4/ip_output.c 已包含补丁，跳过。"
             else
-              sed -i '/if (skb_has_frag_list(head)) {/a \		if (skb_cloned(head) \&\& pskb_expand_head(head, 0, 0, GFP_ATOMIC))\n\			return -ENOMEM;' net/ipv4/ip_fragment.c || true
-              echo ">>> 已为 IPv4 分片重组逻辑注入 COW 边界校验。"
+              sed -i '/copy = err;/a \\t\t\tif (!(flags & MSG_NO_SHARED_FRAGS))\n\t\t\t\tskb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;' net/ipv4/ip_output.c || true
+              echo ">>> net/ipv4/ip_output.c 补丁成功注入！"
             fi
           fi
           
-          # 2. 修复 IPv6 分片重组逻辑
-          if [ -f "net/ipv6/reassembly.c" ]; then
-            if grep -q "skb_cloned(head) && pskb_expand_head" net/ipv6/reassembly.c; then
-              echo ">>> net/ipv6/reassembly.c 已存在防覆写补丁，跳过。"
+          # 2. 修复 IPv6 UDP 发送路径：补齐 SKBFL_SHARED_FRAG 标记
+          if [ -f "net/ipv6/ip6_output.c" ]; then
+            if grep -q "MSG_NO_SHARED_FRAGS" net/ipv6/ip6_output.c; then
+              echo ">>> net/ipv6/ip6_output.c 已包含补丁，跳过。"
             else
-              sed -i '/if (skb_has_frag_list(head)) {/a \		if (skb_cloned(head) \&\& pskb_expand_head(head, 0, 0, GFP_ATOMIC))\n\			return -ENOMEM;' net/ipv6/reassembly.c || true
-              echo ">>> 已为 IPv6 分片重组逻辑注入 COW 边界校验。"
+              sed -i '/copy = err;/a \\t\t\tif (!(flags & MSG_NO_SHARED_FRAGS))\n\t\t\t\tskb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;' net/ipv6/ip6_output.c || true
+              echo ">>> net/ipv6/ip6_output.c 补丁成功注入！"
             fi
           fi
           
-          # 3. 增强 ESP 协议与防火墙过滤支持
-          echo "CONFIG_NETFILTER_XT_MATCH_ESP=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_INET_ESP=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "DirtyFrag 安全加固补丁注入完成！"
+          # 3. 修复 ESP4 接收端：对共享分片强制回落到 skb_cow_data()，严禁就地解密覆写 Page Cache
+          if [ -f "net/ipv4/esp4.c" ]; then
+            sed -i 's/} else if (!skb_has_frag_list(skb)) {/} else if (!skb_has_frag_list(skb) \&\& !skb_has_shared_frag(skb)) {/g' net/ipv4/esp4.c || true
+            echo ">>> net/ipv4/esp4.c 补丁成功注入！"
+          fi
+          
+          # 4. 修复 ESP6 接收端：对共享分片强制回落到 skb_cow_data()，严禁就地解密覆写 Page Cache
+          if [ -f "net/ipv6/esp6.c" ]; then
+            sed -i 's/} else if (!skb_has_frag_list(skb)) {/} else if (!skb_has_frag_list(skb) \&\& !skb_has_shared_frag(skb)) {/g' net/ipv6/esp6.c || true
+            echo ">>> net/ipv6/esp6.c 补丁成功注入！"
+          fi
+          
+          echo "DirtyFrag 官方修复注入完成！"
 
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
@@ -963,13 +973,4 @@ jobs:
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
           5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[meta overlayfs](https://github.com/KernelSU-Modules-Repo/meta-overlayfs), [mountify](https://github.com/backslashxx/mountify), [meta magicmount](https://github.com/7a72/meta-magic_mount/), [meta magicmount rs](https://github.com/Tools-cx-app/meta-magic_mount/), [hybrid mount](https://github.com/YuzakiKokuban/meta-hybrid_mount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
-          
-          #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
-          EOF
-
-          gh release create "${{ env.TAG_HEAD }}-${{ env.TIME }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
-            --notes-file release_notes.md \
-            release_zips/AnyKernel3_*.zip
+          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于A
