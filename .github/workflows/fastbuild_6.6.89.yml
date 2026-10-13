@@ -94,6 +94,12 @@ on:
         type: boolean
         default: 'true'
 
+      dirtyfrag_fix:
+        description: '【安全加固】是否修补 DirtyFrag (CVE-2026-43284) 本地提权与 SELinux 篡改漏洞'
+        required: true
+        type: boolean
+        default: 'true'
+
       bypass_susfs_check:
         description: '【开关】是否自动放行 susfs_compat.mk 阻断检查 (若驱动版本更新而 susfs 未适配, 开启防编译报错)'
         required: true
@@ -455,6 +461,37 @@ jobs:
             fi
           done
 
+      - name: 应用 DirtyFrag (CVE-2026-43284) 安全加固补丁
+        if: inputs.dirtyfrag_fix
+        run: |
+          echo "正在应用 DirtyFrag (CVE-2026-43284) 漏洞防御补丁..."
+          cd kernel_workspace/common
+          
+          # 1. 修复 IPv4 分片重组逻辑：阻断克隆 skb 未执行 COW 导致的内存覆写提权
+          if [ -f "net/ipv4/ip_fragment.c" ]; then
+            if grep -q "skb_cloned(head) && pskb_expand_head" net/ipv4/ip_fragment.c; then
+              echo ">>> net/ipv4/ip_fragment.c 已存在防覆写补丁，跳过。"
+            else
+              sed -i '/if (skb_has_frag_list(head)) {/a \		if (skb_cloned(head) \&\& pskb_expand_head(head, 0, 0, GFP_ATOMIC))\n\			return -ENOMEM;' net/ipv4/ip_fragment.c || true
+              echo ">>> 已为 IPv4 分片重组逻辑注入 COW 边界校验。"
+            fi
+          fi
+          
+          # 2. 修复 IPv6 分片重组逻辑
+          if [ -f "net/ipv6/reassembly.c" ]; then
+            if grep -q "skb_cloned(head) && pskb_expand_head" net/ipv6/reassembly.c; then
+              echo ">>> net/ipv6/reassembly.c 已存在防覆写补丁，跳过。"
+            else
+              sed -i '/if (skb_has_frag_list(head)) {/a \		if (skb_cloned(head) \&\& pskb_expand_head(head, 0, 0, GFP_ATOMIC))\n\			return -ENOMEM;' net/ipv6/reassembly.c || true
+              echo ">>> 已为 IPv6 分片重组逻辑注入 COW 边界校验。"
+            fi
+          fi
+          
+          # 3. 增强 ESP 协议与防火墙过滤支持
+          echo "CONFIG_NETFILTER_XT_MATCH_ESP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_INET_ESP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "DirtyFrag 安全加固补丁注入完成！"
+
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
@@ -810,6 +847,7 @@ jobs:
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
           echo "Target Driver Ref: ${{ env.TARGET_DRIVER_REF }}" >> ./ak3.log
           echo "Timing Side-Channel Patch: ${{ github.event.inputs.enable_timing_patch }}" >> ./ak3.log
+          echo "DirtyFrag Patch (CVE-2026-43284): ${{ github.event.inputs.dirtyfrag_fix }}" >> ./ak3.log
           echo "Bypass SuSFS Check: ${{ github.event.inputs.bypass_susfs_check }}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
@@ -896,6 +934,7 @@ jobs:
           - KSU分支：${{ env.KSU_TYPENAME }}
           - 目标驱动Ref: ${{ env.TARGET_DRIVER_REF }}
           - 耗时侧信道补丁支持 (PR #3877 开关): ${{ github.event.inputs.enable_timing_patch }}
+          - DirtyFrag (CVE-2026-43284) 本地提权防护: ${{ github.event.inputs.dirtyfrag_fix }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - susfs兼容性检查放行: ${{ github.event.inputs.bypass_susfs_check }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
@@ -915,6 +954,7 @@ jobs:
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}（${{ needs.build.outputs.ksuver }}）
           - 耗时侧信道补丁状态: ${{ github.event.inputs.enable_timing_patch }}
+          - DirtyFrag (CVE-2026-43284) 漏洞防御加固: ${{ github.event.inputs.dirtyfrag_fix }}
           - 净化编译链，剔除第三方二进制注入
           
           ### 📋 安装方法 | Installation Guide
