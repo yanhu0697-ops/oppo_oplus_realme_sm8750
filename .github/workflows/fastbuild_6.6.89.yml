@@ -100,6 +100,12 @@ on:
         type: boolean
         default: 'true'
 
+      posix_timer_fix:
+        description: '【安全加固】是否修补 POSIX CPU Timer (CVE-2026-98260) 本地提权与 UAF 漏洞'
+        required: true
+        type: boolean
+        default: 'true'
+
       bypass_susfs_check:
         description: '【开关】是否自动放行 susfs_compat.mk 阻断检查 (若驱动版本更新而 susfs 未适配, 开启防编译报错)'
         required: true
@@ -459,6 +465,7 @@ jobs:
         run: |
           echo "正在应用内核系统调用耗时侧信道补丁 (抹平 newfstatat 与 statx 时间比值差异)..."
           cd kernel_workspace
+          ROOT_DIR="$(pwd)"
           
           # 依次检测所有可能的驱动目录并应用优化
           for KSU_DIR in KernelSU KernelSU-Next common/drivers/kernelsu; do
@@ -483,7 +490,7 @@ jobs:
                 fi
               fi
               
-              cd "${{ github.workspace }}/kernel_workspace"
+              cd "$ROOT_DIR"
             fi
           done
 
@@ -527,16 +534,56 @@ jobs:
           
           echo "DirtyFrag 官方修复注入完成！"
 
+      - name: 应用 POSIX CPU Timer (CVE-2026-98260) 官方安全修复 (Commit acb03d3)
+        if: inputs.posix_timer_fix
+        run: |
+          echo "正在应用 Linux 官方 CVE-2026-98260 修复补丁 (Commit acb03d3)..."
+          cd kernel_workspace/common
+          
+          if grep -q "posixtimer_exec" fs/exec.c; then
+            echo ">>> fs/exec.c 已包含修复，跳过打补丁。"
+          else
+            python3 -c '
+import re
+
+with open("fs/exec.c", "r") as f:
+    text = f.read()
+
+if "posixtimer_exec" not in text:
+    func_code = """
+static void posixtimer_exec(struct task_struct *me)
+{
+#ifdef CONFIG_POSIX_TIMERS
+\tspin_lock_irq(&me->sighand->siglock);
+\tposix_cpu_timers_exit(me);
+\tspin_unlock_irq(&me->sighand->siglock);
+\texit_itimers(me);
+\tflush_itimer_signals();
+#endif
+}
+"""
+    text = re.sub(r"(int\s+begin_new_exec\s*\([^)]*\))", func_code + r"\n\1", text, count=1)
+    text = re.sub(r"(retval\s*=\s*de_thread\(me\);\s*if\s*\(retval\)\s*goto\s+out;)", r"\1\n\n\tposixtimer_exec(me);", text, count=1)
+    old_cleanup_pattern = r"#ifdef\s+CONFIG_POSIX_TIMERS\s+spin_lock_irq\(&me->sighand->siglock\);\s+posix_cpu_timers_exit\(me\);\s+spin_unlock_irq\(&me->sighand->siglock\);\s+exit_itimers\(me\);\s+flush_itimer_signals\(\);\s+#endif"
+    text = re.sub(old_cleanup_pattern, "/* POSIX timers cleanup moved right after de_thread */", text, flags=re.MULTILINE)
+    
+    with open("fs/exec.c", "w") as f:
+        f.write(text)
+    print(">>> CVE-2026-98260 (posixtimer_exec) 修复注入成功！")
+'
+          fi
+
       - name: 净化驱动 Git 工作区 (消除 -dirty 后缀)
         run: |
           cd kernel_workspace
+          ROOT_DIR="$(pwd)"
           for KSU_DIR in KernelSU KernelSU-Next common/drivers/kernelsu; do
             if [ -d "$KSU_DIR/.git" ]; then
               echo ">>> 正在提交 $KSU_DIR 的本地修补，消除 -dirty 后缀..."
               cd "$KSU_DIR"
               git config user.name "cctv18-builder" && git config user.email "builder@local"
               git commit -am "chore: clean working tree for pristine release" || true
-              cd "${{ github.workspace }}/kernel_workspace"
+              cd "$ROOT_DIR"
             fi
           done
 
@@ -896,6 +943,7 @@ jobs:
           echo "Target Driver Ref: ${{ env.TARGET_DRIVER_REF }}" >> ./ak3.log
           echo "Timing Side-Channel Patch: ${{ github.event.inputs.enable_timing_patch }}" >> ./ak3.log
           echo "DirtyFrag Patch (CVE-2026-43284): ${{ github.event.inputs.dirtyfrag_fix }}" >> ./ak3.log
+          echo "POSIX Timer Patch (CVE-2026-98260): ${{ github.event.inputs.posix_timer_fix }}" >> ./ak3.log
           echo "Bypass SuSFS Check: ${{ github.event.inputs.bypass_susfs_check }}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
@@ -983,6 +1031,7 @@ jobs:
           - 目标驱动Ref: ${{ env.TARGET_DRIVER_REF }}
           - 耗时侧信道补丁支持 (PR #3877 开关): ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 本地提权防护: ${{ github.event.inputs.dirtyfrag_fix }}
+          - POSIX CPU Timer (CVE-2026-98260) 本地提权防护: ${{ github.event.inputs.posix_timer_fix }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - susfs兼容性检查放行: ${{ github.event.inputs.bypass_susfs_check }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
@@ -1003,6 +1052,7 @@ jobs:
           - 更新${{ env.KSU_TYPENAME }}（${{ needs.build.outputs.ksuver }}）
           - 耗时侧信道补丁状态: ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 漏洞防御加固: ${{ github.event.inputs.dirtyfrag_fix }}
+          - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
           - 净化编译链，剔除第三方二进制注入
           
           ### 📋 安装方法 | Installation Guide
