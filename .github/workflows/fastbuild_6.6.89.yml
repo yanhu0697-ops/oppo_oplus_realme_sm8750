@@ -1047,11 +1047,12 @@ static void posixtimer_exec(struct task_struct *me)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
           - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
-          
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}（${{ needs.build.outputs.ksuver }}）
           - 耗时侧信道补丁状态: ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 漏洞防御加固: ${{ github.event.inputs.dirtyfrag_fix }}
+          - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
+          - 净化编译链，剔除第三方二进制注入
           - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
           - 净化编译链，剔除第三方二进制注入
           
