@@ -100,6 +100,21 @@ on:
         type: boolean
         default: 'true'
 
+      posix_timer_fix:
+        description: '【安全加固】是否修补 POSIX CPU Timer (CVE-2026-98260) 本地提权与 UAF 漏洞 (Commit acb03d3)'
+        required: true
+        type: boolean
+        default: 'true'
+
+      susfs_source:
+        description: '【SUSFS补丁源】选择补丁来源 (upstream: SukiSU官方最新v2.0.0+，适配4.2.0与4.2.1; custom_repo: 仓库预留特化susfs4oki[v1.5.8])'
+        required: true
+        type: choice
+        default: 'upstream'
+        options:
+          - 'upstream'
+          - 'custom_repo'
+
       bypass_susfs_check:
         description: '【开关】是否自动放行 susfs_compat.mk 阻断检查 (若驱动版本更新而 susfs 未适配, 开启防编译报错)'
         required: true
@@ -427,25 +442,49 @@ jobs:
         run: |
           cd kernel_workspace
           if [[ ${{ github.event.inputs.ksu_type }} != "none" ]]; then
-            echo "正在添加susfs补丁..."
-            git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
-            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
-            cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
-            cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-            cd ./common
-            patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-            patch -p1 -N -F 3 < 69_hide_stuff.patch || true
-            cd ..
+            echo "正在配置 SuSFS 补丁..."
+            if [[ "${{ github.event.inputs.susfs_source }}" == "upstream" ]]; then
+              echo ">>> 选择【上游官方最新】：从 SukiSU-Ultra/SukiSU_patch (v2.0.0+) 拉取补丁..."
+              git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU_patch.git susfs_upstream
+              if [ -d "./susfs_upstream/other/fs" ]; then
+                cp -rf ./susfs_upstream/other/fs/* ./common/fs/ 2>/dev/null || true
+              fi
+              if [ -d "./susfs_upstream/other/include/linux" ]; then
+                cp -rf ./susfs_upstream/other/include/linux/* ./common/include/linux/ 2>/dev/null || true
+              fi
+              cp ./susfs_upstream/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/ 2>/dev/null || true
+              cp ./susfs_upstream/69_hide_stuff.patch ./common/ 2>/dev/null || true
+              cd ./common
+              if [ -f "50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch" ]; then
+                patch -p1 -F 3 < "50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch" || true
+              fi
+              if [ -f "69_hide_stuff.patch" ]; then
+                patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+              fi
+              cd ..
+            else
+              echo ">>> 选择【仓库预留特化】：从 cctv18/susfs4oki (v1.5.8) 拉取补丁..."
+              git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+              wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/69_hide_stuff.patch -O ./common/69_hide_stuff.patch
+              cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+              cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+              cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+              cd ./common
+              patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+              patch -p1 -N -F 3 < 69_hide_stuff.patch || true
+              cd ..
+            fi
           else
             echo "已选择无内置KernelSU模式，跳过susfs配置..."
           fi
           if [[ ${{ github.event.inputs.ksu_type }} == "ksu" ]]; then
             echo "正在为原版 KernelSU (tiann/KernelSU)添加补丁..."
-            cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
-            cd ./KernelSU
-            patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
-            cd ..
+            if [ -d "./susfs4ksu/kernel_patches/KernelSU" ]; then
+              cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+              cd ./KernelSU
+              patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
+              cd ..
+            fi
           fi
           if [[ "${{ github.event.inputs.bypass_susfs_check }}" == "true" ]]; then
             echo ">>> 正在为 susfs_compat.mk 实施全量自动降级放行策略，规避版本阻断..."
