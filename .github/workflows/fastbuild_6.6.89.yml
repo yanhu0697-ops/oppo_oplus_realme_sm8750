@@ -542,61 +542,34 @@ jobs:
           if grep -q "posixtimer_exec" fs/exec.c; then
             echo ">>> fs/exec.c 已包含修复，跳过打补丁。"
           else
-            patch -p1 --forward << 'EOF' || exit 1
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@ -1115,6 +1115,17 @@ static struct file *bprm_identity_file(const struct linux_binprm *bprm)
- 	return bprm->file;
- }
- 
-+static void posixtimer_exec(struct task_struct *me)
-+{
-+#ifdef CONFIG_POSIX_TIMERS
-+	spin_lock_irq(&me->sighand->siglock);
-+	posix_cpu_timers_exit(me);
-+	spin_unlock_irq(&me->sighand->siglock);
-+	exit_itimers(me);
-+	flush_itimer_signals();
-+#endif
-+}
-+
- /*
-  * Calling this is the point of no return. None of the failures will be
-  * seen by userspace since either the process is already taking a fatal
-@@ -1152,6 +1163,16 @@ int begin_new_exec(struct linux_binprm * bprm)
- 	retval = de_thread(me);
- 	if (retval)
- 		goto out;
-+
-+	/*
-+	 * This must be done here to ensure that POSIX CPU timers which were
-+	 * armed on the current task are dequeued from me::posix_cputimers.
-+	 * Otherwise in case of a TID switch the deletion of the related POSIX
-+	 * timer would not remove an enqueued timer because the TID lookup
-+	 * of the old TID fails.
-+	 */
-+	posixtimer_exec(me);
-+
- 	/* see the comment in check_unsafe_exec() */
- 	current->fs->in_exec = 0;
- 
-@@ -1206,14 +1227,6 @@ int begin_new_exec(struct linux_binprm * bprm)
- 	if (retval)
- 		goto out_unlock;
- 
--#ifdef CONFIG_POSIX_TIMERS
--	spin_lock_irq(&me->sighand->siglock);
--	posix_cpu_timers_exit(me);
--	spin_unlock_irq(&me->sighand->siglock);
--	exit_itimers(me);
--	flush_itimer_signals();
--#endif
--
- 	/*
- 	 * Make the signal table private.
- 	 */
-EOF
-            echo ">>> fs/exec.c 补丁成功注入！"
+            python3 -c '
+import re
+
+with open("fs/exec.c", "r") as f:
+    text = f.read()
+
+if "posixtimer_exec" not in text:
+    func_code = """
+static void posixtimer_exec(struct task_struct *me)
+{
+#ifdef CONFIG_POSIX_TIMERS
+\tspin_lock_irq(&me->sighand->siglock);
+\tposix_cpu_timers_exit(me);
+\tspin_unlock_irq(&me->sighand->siglock);
+\texit_itimers(me);
+\tflush_itimer_signals();
+#endif
+}
+"""
+    text = re.sub(r"(int\s+begin_new_exec\s*\([^)]*\))", func_code + r"\n\1", text, count=1)
+    text = re.sub(r"(retval\s*=\s*de_thread\(me\);\s*if\s*\(retval\)\s*goto\s+out;)", r"\1\n\n\tposixtimer_exec(me);", text, count=1)
+    old_cleanup_pattern = r"#ifdef\s+CONFIG_POSIX_TIMERS\s+spin_lock_irq\(&me->sighand->siglock\);\s+posix_cpu_timers_exit\(me\);\s+spin_unlock_irq\(&me->sighand->siglock\);\s+exit_itimers\(me\);\s+flush_itimer_signals\(\);\s+#endif"
+    text = re.sub(old_cleanup_pattern, "/* POSIX timers cleanup moved right after de_thread */", text, flags=re.MULTILINE)
+    
+    with open("fs/exec.c", "w") as f:
+        f.write(text)
+    print(">>> CVE-2026-98260 (posixtimer_exec) 修复注入成功！")
+'
           fi
 
       - name: 净化驱动 Git 工作区 (消除 -dirty 后缀)
