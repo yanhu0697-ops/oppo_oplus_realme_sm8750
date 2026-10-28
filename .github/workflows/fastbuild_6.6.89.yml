@@ -100,6 +100,12 @@ on:
         type: boolean
         default: 'true'
 
+      posix_timer_fix:
+        description: '【安全加固】是否修补 POSIX CPU Timer (CVE-2026-98260) 本地提权与 UAF 漏洞'
+        required: true
+        type: boolean
+        default: 'true'
+
       bypass_susfs_check:
         description: '【开关】是否自动放行 susfs_compat.mk 阻断检查 (若驱动版本更新而 susfs 未适配, 开启防编译报错)'
         required: true
@@ -527,6 +533,72 @@ jobs:
           
           echo "DirtyFrag 官方修复注入完成！"
 
+      - name: 应用 POSIX CPU Timer (CVE-2026-98260) 官方安全修复 (Commit acb03d3)
+        if: inputs.posix_timer_fix
+        run: |
+          echo "正在应用 Linux 官方 CVE-2026-98260 修复补丁 (Commit acb03d3)..."
+          cd kernel_workspace/common
+          
+          if grep -q "posixtimer_exec" fs/exec.c; then
+            echo ">>> fs/exec.c 已包含修复，跳过打补丁。"
+          else
+            patch -p1 --forward << 'EOF' || exit 1
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1115,6 +1115,17 @@ static struct file *bprm_identity_file(const struct linux_binprm *bprm)
+ 	return bprm->file;
+ }
+ 
++static void posixtimer_exec(struct task_struct *me)
++{
++#ifdef CONFIG_POSIX_TIMERS
++	spin_lock_irq(&me->sighand->siglock);
++	posix_cpu_timers_exit(me);
++	spin_unlock_irq(&me->sighand->siglock);
++	exit_itimers(me);
++	flush_itimer_signals();
++#endif
++}
++
+ /*
+  * Calling this is the point of no return. None of the failures will be
+  * seen by userspace since either the process is already taking a fatal
+@@ -1152,6 +1163,16 @@ int begin_new_exec(struct linux_binprm * bprm)
+ 	retval = de_thread(me);
+ 	if (retval)
+ 		goto out;
++
++	/*
++	 * This must be done here to ensure that POSIX CPU timers which were
++	 * armed on the current task are dequeued from me::posix_cputimers.
++	 * Otherwise in case of a TID switch the deletion of the related POSIX
++	 * timer would not remove an enqueued timer because the TID lookup
++	 * of the old TID fails.
++	 */
++	posixtimer_exec(me);
++
+ 	/* see the comment in check_unsafe_exec() */
+ 	current->fs->in_exec = 0;
+ 
+@@ -1206,14 +1227,6 @@ int begin_new_exec(struct linux_binprm * bprm)
+ 	if (retval)
+ 		goto out_unlock;
+ 
+-#ifdef CONFIG_POSIX_TIMERS
+-	spin_lock_irq(&me->sighand->siglock);
+-	posix_cpu_timers_exit(me);
+-	spin_unlock_irq(&me->sighand->siglock);
+-	exit_itimers(me);
+-	flush_itimer_signals();
+-#endif
+-
+ 	/*
+ 	 * Make the signal table private.
+ 	 */
+EOF
+            echo ">>> fs/exec.c 补丁成功注入！"
+          fi
+
       - name: 净化驱动 Git 工作区 (消除 -dirty 后缀)
         run: |
           cd kernel_workspace
@@ -896,6 +968,7 @@ jobs:
           echo "Target Driver Ref: ${{ env.TARGET_DRIVER_REF }}" >> ./ak3.log
           echo "Timing Side-Channel Patch: ${{ github.event.inputs.enable_timing_patch }}" >> ./ak3.log
           echo "DirtyFrag Patch (CVE-2026-43284): ${{ github.event.inputs.dirtyfrag_fix }}" >> ./ak3.log
+          echo "POSIX Timer Patch (CVE-2026-98260): ${{ github.event.inputs.posix_timer_fix }}" >> ./ak3.log
           echo "Bypass SuSFS Check: ${{ github.event.inputs.bypass_susfs_check }}" >> ./ak3.log
           echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
