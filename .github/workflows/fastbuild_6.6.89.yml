@@ -1056,6 +1056,7 @@ EOF
           - 目标驱动Ref: ${{ env.TARGET_DRIVER_REF }}
           - 耗时侧信道补丁支持 (PR #3877 开关): ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 本地提权防护: ${{ github.event.inputs.dirtyfrag_fix }}
+          - POSIX CPU Timer (CVE-2026-98260) 本地提权防护: ${{ github.event.inputs.posix_timer_fix }}
           - susfs支持：${{ github.event.inputs.susfs_enable }}
           - susfs兼容性检查放行: ${{ github.event.inputs.bypass_susfs_check }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
@@ -1076,6 +1077,7 @@ EOF
           - 更新${{ env.KSU_TYPENAME }}（${{ needs.build.outputs.ksuver }}）
           - 耗时侧信道补丁状态: ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 漏洞防御加固: ${{ github.event.inputs.dirtyfrag_fix }}
+          - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
           - 净化编译链，剔除第三方二进制注入
           
           ### 📋 安装方法 | Installation Guide
