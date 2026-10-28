@@ -543,34 +543,7 @@ jobs:
           if grep -q "posixtimer_exec" fs/exec.c; then
             echo ">>> fs/exec.c 已包含修复，跳过打补丁。"
           else
-            python3 -c '
-import re
-
-with open("fs/exec.c", "r") as f:
-    text = f.read()
-
-if "posixtimer_exec" not in text:
-    func_code = """
-static void posixtimer_exec(struct task_struct *me)
-{
-#ifdef CONFIG_POSIX_TIMERS
-\tspin_lock_irq(&me->sighand->siglock);
-\tposix_cpu_timers_exit(me);
-\tspin_unlock_irq(&me->sighand->siglock);
-\texit_itimers(me);
-\tflush_itimer_signals();
-#endif
-}
-"""
-    text = re.sub(r"(int\s+begin_new_exec\s*\([^)]*\))", func_code + r"\n\1", text, count=1)
-    text = re.sub(r"(retval\s*=\s*de_thread\(me\);\s*if\s*\(retval\)\s*goto\s+out;)", r"\1\n\n\tposixtimer_exec(me);", text, count=1)
-    old_cleanup_pattern = r"#ifdef\s+CONFIG_POSIX_TIMERS\s+spin_lock_irq\(&me->sighand->siglock\);\s+posix_cpu_timers_exit\(me\);\s+spin_unlock_irq\(&me->sighand->siglock\);\s+exit_itimers\(me\);\s+flush_itimer_signals\(\);\s+#endif"
-    text = re.sub(old_cleanup_pattern, "/* POSIX timers cleanup moved right after de_thread */", text, flags=re.MULTILINE)
-    
-    with open("fs/exec.c", "w") as f:
-        f.write(text)
-    print(">>> CVE-2026-98260 (posixtimer_exec) 修复注入成功！")
-'
+            python3 -c 'p="fs/exec.c"; s=open(p).read(); f="static void posixtimer_exec(struct task_struct *me)\n{\n#ifdef CONFIG_POSIX_TIMERS\n\tspin_lock_irq(&me->sighand->siglock);\n\tposix_cpu_timers_exit(me);\n\tspin_unlock_irq(&me->sighand->siglock);\n\texit_itimers(me);\n\tflush_itimer_signals();\n#endif\n}\n\n"; s=s.replace("int begin_new_exec(", f+"int begin_new_exec(", 1); s=s.replace("retval = de_thread(me);\n\tif (retval)\n\t\tgoto out;", "retval = de_thread(me);\n\tif (retval)\n\t\tgoto out;\n\n\tposixtimer_exec(me);", 1); old="\t/*\n\t * Flush all posix-timers.\n\t */\n#ifdef CONFIG_POSIX_TIMERS\n\tspin_lock_irq(&me->sighand->siglock);\n\tposix_cpu_timers_exit(me);\n\tspin_unlock_irq(&me->sighand->siglock);\n\texit_itimers(me);\n\tflush_itimer_signals();\n#endif"; s=s.replace(old, "\t/* POSIX timers cleanup moved right after de_thread */"); open(p,"w").write(s); print(">>> CVE-2026-98260 (posixtimer_exec) 修复注入完成！")'
           fi
 
       - name: 净化驱动 Git 工作区 (消除 -dirty 后缀)
@@ -1051,8 +1024,6 @@ static void posixtimer_exec(struct task_struct *me)
           - 更新${{ env.KSU_TYPENAME }}（${{ needs.build.outputs.ksuver }}）
           - 耗时侧信道补丁状态: ${{ github.event.inputs.enable_timing_patch }}
           - DirtyFrag (CVE-2026-43284) 漏洞防御加固: ${{ github.event.inputs.dirtyfrag_fix }}
-          - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
-          - 净化编译链，剔除第三方二进制注入
           - POSIX CPU Timer (CVE-2026-98260) 漏洞防御加固: ${{ github.event.inputs.posix_timer_fix }}
           - 净化编译链，剔除第三方二进制注入
           
